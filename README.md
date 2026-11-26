@@ -31,4 +31,4 @@ writes `out/snd-usb-audio.ko`. On AA Signature Suite for Linux the module is ins
 
 The patches and the module are licensed under the GNU General Public License version 2
 (see [LICENSE](LICENSE)), the licence of the Linux kernel's `sound/usb` driver.
-The AA Signature programs (Renderer, Media Server, System) are AA Audio's own and not part of this repository.
+The AA Signature Suite programs (Renderer, Media Server, System) are AA Audio's own and not part of this repository.
