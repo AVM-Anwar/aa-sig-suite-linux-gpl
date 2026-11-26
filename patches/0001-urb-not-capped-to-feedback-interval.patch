@@ -1,0 +1,17 @@
+AA Audio change to snd-usb-audio (GPL-2.0-or-later), 2026-11-25
+
+Reduces USB interrupts: audio URBs are no longer cut to the feedback endpoint's interval.
+
+--- a/sound/usb/endpoint.c
++++ b/sound/usb/endpoint.c
+@@ -1190,9 +1190,7 @@
+ 		packs_per_ms = 1;
+ 		max_packs_per_urb = MAX_PACKS;
+ 	}
+-	if (ep->sync_source && !ep->implicit_fb_sync)
+-		max_packs_per_urb = min(max_packs_per_urb,
+-					1U << ep->sync_source->syncinterval);
++	/* AA: audio URBs not cut to the feedback interval (fewer URB completions) */
+ 	max_packs_per_urb = max(1u, max_packs_per_urb >> ep->datainterval);
+
+ 	/*

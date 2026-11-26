@@ -1,0 +1,112 @@
+AA Audio change to snd-usb-audio (GPL-2.0-or-later), 2026-11-25. Applies after patch 0001.
+
+Reduces USB interrupts: each feedback (sync) URB carries several feedback packets; the newest valid one is used.
+
+--- a/sound/usb/card.h	2026-11-17 18:14:21.000000000 +0800
++++ b/sound/usb/card.h	2026-11-25 14:38:17.453141351 +0800
+@@ -7,6 +7,8 @@
+ #define MAX_PACKS_HS	(MAX_PACKS * 8)	/* in high speed mode */
+ #define MAX_URBS	12
+ #define SYNC_URBS	4	/* always four urbs for sync */
++#define SYNC_MAX_PACKS	8	/* AA: feedback packets per sync URB, at most... */
++#define SYNC_URB_MS	8	/* AA: ...and at most this many ms per sync URB */
+ #define MAX_QUEUE	18	/* try not to exceed this queue length, in ms */
+ 
+ struct audioformat {
+--- a/sound/usb/endpoint.c	2026-11-25 14:38:17.441761028 +0800
++++ b/sound/usb/endpoint.c	2026-11-25 14:38:17.543693294 +0800
+@@ -397,8 +397,11 @@
+ 		break;
+ 
+ 	case SND_USB_ENDPOINT_TYPE_SYNC:
+-		urb->iso_frame_desc[0].length = min(4u, ep->syncmaxsize);
+-		urb->iso_frame_desc[0].offset = 0;
++		/* AA: several feedback packets per URB, one 4-byte slot each */
++		for (i = 0; i < urb_ctx->packets; i++) {
++			urb->iso_frame_desc[i].length = min(4u, ep->syncmaxsize);
++			urb->iso_frame_desc[i].offset = i * 4;
++		}
+ 		break;
+ 	}
+ 	return 0;
+@@ -1091,7 +1094,7 @@
+ 	for (i = 0; i < ep->nurbs; i++)
+ 		release_urb_ctx(&ep->urb[i]);
+ 
+-	usb_free_coherent(ep->chip->dev, SYNC_URBS * 4,
++	usb_free_coherent(ep->chip->dev, SYNC_URBS * SYNC_MAX_PACKS * 4,
+ 			  ep->syncbuf, ep->sync_dma);
+ 
+ 	ep->syncbuf = NULL;
+@@ -1290,11 +1293,17 @@
+ {
+ 	struct snd_usb_audio *chip = ep->chip;
+ 	int i;
++	/* AA: feedback packets per URB - one URB completion (interrupt) for several
++	 * feedback packets instead of one each; the newest valid one is used */
++	unsigned int units = snd_usb_get_speed(chip->dev) == USB_SPEED_FULL ? 1 : 8;
++	unsigned int packs = (SYNC_URB_MS * units) >> ep->syncinterval;
++
++	packs = clamp(packs, 1u, (unsigned int)SYNC_MAX_PACKS);
+ 
+ 	usb_audio_dbg(chip, "Setting params for sync EP 0x%x, pipe 0x%x\n",
+ 		      ep->ep_num, ep->pipe);
+ 
+-	ep->syncbuf = usb_alloc_coherent(chip->dev, SYNC_URBS * 4,
++	ep->syncbuf = usb_alloc_coherent(chip->dev, SYNC_URBS * SYNC_MAX_PACKS * 4,
+ 					 GFP_KERNEL, &ep->sync_dma);
+ 	if (!ep->syncbuf)
+ 		return -ENOMEM;
+@@ -1304,16 +1313,16 @@
+ 		struct snd_urb_ctx *u = &ep->urb[i];
+ 		u->index = i;
+ 		u->ep = ep;
+-		u->packets = 1;
+-		u->urb = usb_alloc_urb(1, GFP_KERNEL);
++		u->packets = packs;
++		u->urb = usb_alloc_urb(packs, GFP_KERNEL);
+ 		if (!u->urb)
+ 			goto out_of_memory;
+-		u->urb->transfer_buffer = ep->syncbuf + i * 4;
+-		u->urb->transfer_dma = ep->sync_dma + i * 4;
+-		u->urb->transfer_buffer_length = 4;
++		u->urb->transfer_buffer = ep->syncbuf + i * SYNC_MAX_PACKS * 4;
++		u->urb->transfer_dma = ep->sync_dma + i * SYNC_MAX_PACKS * 4;
++		u->urb->transfer_buffer_length = packs * 4;
+ 		u->urb->pipe = ep->pipe;
+ 		u->urb->transfer_flags = URB_NO_TRANSFER_DMA_MAP;
+-		u->urb->number_of_packets = 1;
++		u->urb->number_of_packets = packs;
+ 		u->urb->interval = 1 << ep->syncinterval;
+ 		u->urb->context = u;
+ 		u->urb->complete = snd_complete_urb;
+@@ -1765,6 +1774,7 @@
+ 				    const struct urb *urb)
+ {
+ 	int shift;
++	int pk;
+ 	unsigned int f;
+ 	unsigned long flags;
+ 
+@@ -1861,12 +1871,17 @@
+ 	 * and must detect it automatically.
+ 	 */
+ 
+-	if (urb->iso_frame_desc[0].status != 0 ||
+-	    urb->iso_frame_desc[0].actual_length < 3)
++	/* AA: a sync URB may hold several feedback packets: the newest valid one */
++	for (pk = urb->number_of_packets - 1; pk >= 0; pk--)
++		if (urb->iso_frame_desc[pk].status == 0 &&
++		    urb->iso_frame_desc[pk].actual_length >= 3)
++			break;
++	if (pk < 0)
+ 		return;
+ 
+-	f = le32_to_cpup(urb->transfer_buffer);
+-	if (urb->iso_frame_desc[0].actual_length == 3)
++	f = le32_to_cpup((const __le32 *)((const u8 *)urb->transfer_buffer +
++					  urb->iso_frame_desc[pk].offset));
++	if (urb->iso_frame_desc[pk].actual_length == 3)
+ 		f &= 0x00ffffff;
+ 	else
+ 		f &= 0x0fffffff;
